@@ -1,4 +1,6 @@
+import contextlib
 import copy
+import csv
 import glob
 import json
 import os
@@ -9,8 +11,11 @@ import tempfile
 import threading
 import time
 import traceback
+import urllib.request
 from pathlib import Path
 
+import numpy as np
+import scipy.signal
 import yt_dlp
 
 
@@ -24,8 +29,9 @@ class RestorationStudioBackend:
     RESTORATION_PRESET_ORDER = ["light", "medium", "heavy", "archive"]
     HUM_FREQUENCIES = [50, 60]
     PROFILE_LABELS = {
-        "restore": "Restore Old Recording",
+        "restore": "Restore Old Song",
         "enhance": "Enhance Song",
+        "compression": "Repair Compressed Audio",
         "stem": "Stem Rebalance",
         "advanced": "Advanced / Experimental",
     }
@@ -36,9 +42,11 @@ class RestorationStudioBackend:
             "normalize_audio": True,
             "stem_rebalance": False,
             "bandwidth_restore": False,
+            "ai_dereverb": False,
             "restoration_preset": "medium",
             "hum_frequency": 60,
             "backend": "roformer",
+            "ai_model_preset": "balanced",
             "bass_boost": 0,
             "treble_boost": 0,
             "volume_boost": 0,
@@ -49,9 +57,26 @@ class RestorationStudioBackend:
             "normalize_audio": True,
             "stem_rebalance": False,
             "bandwidth_restore": False,
+            "ai_dereverb": False,
             "restoration_preset": "light",
             "hum_frequency": 60,
             "backend": "roformer",
+            "ai_model_preset": "balanced",
+            "bass_boost": 1,
+            "treble_boost": 1,
+            "volume_boost": 0,
+        },
+        "compression": {
+            "restoration_cleanup": False,
+            "clarity_mastering": True,
+            "normalize_audio": True,
+            "stem_rebalance": False,
+            "bandwidth_restore": True,
+            "ai_dereverb": False,
+            "restoration_preset": "light",
+            "hum_frequency": 60,
+            "backend": "roformer",
+            "ai_model_preset": "low_vram",
             "bass_boost": 1,
             "treble_boost": 1,
             "volume_boost": 0,
@@ -62,9 +87,11 @@ class RestorationStudioBackend:
             "normalize_audio": False,
             "stem_rebalance": True,
             "bandwidth_restore": False,
+            "ai_dereverb": False,
             "restoration_preset": "light",
             "hum_frequency": 60,
             "backend": "roformer",
+            "ai_model_preset": "quality",
             "bass_boost": 0,
             "treble_boost": 0,
             "volume_boost": 0,
@@ -75,19 +102,52 @@ class RestorationStudioBackend:
             "normalize_audio": True,
             "stem_rebalance": False,
             "bandwidth_restore": False,
+            "ai_dereverb": False,
             "restoration_preset": "medium",
             "hum_frequency": 60,
             "backend": "roformer",
+            "ai_model_preset": "balanced",
             "bass_boost": 0,
             "treble_boost": 0,
             "volume_boost": 0,
         },
     }
     BROWSER_OPTIONS = ["chrome", "edge", "firefox"]
+    AI_MODEL_PRESET_LABELS = {
+        "quality": "Highest Quality",
+        "balanced": "Balanced",
+        "low_vram": "Low VRAM",
+    }
+    AI_MODEL_PRESET_ORDER = ["quality", "balanced", "low_vram"]
+    AI_MODEL_PRESETS = {
+        "quality": {
+            "description": "6-stem BS-RoFormer-SW",
+            "preferred_models": ["BS-Roformer-SW.ckpt"],
+            "arch": "mdxc",
+            "sample_rate": 48000,
+            "extra_args": ["--mdxc_segment_size", "256", "--mdxc_overlap", "8", "--mdxc_batch_size", "1"],
+        },
+        "balanced": {
+            "description": "2-stem BS-RoFormer Viperx 12.9755",
+            "preferred_models": ["model_bs_roformer_ep_317_sdr_12.9755.ckpt", "BS-Roformer-SW.ckpt"],
+            "arch": "mdxc",
+            "sample_rate": 48000,
+            "extra_args": ["--mdxc_segment_size", "256", "--mdxc_overlap", "8", "--mdxc_batch_size", "1"],
+        },
+        "low_vram": {
+            "description": "UVR MDX KARA 2 ONNX",
+            "preferred_models": ["UVR_MDXNET_KARA_2.onnx", "Kim_Vocal_2.onnx"],
+            "arch": "mdx",
+            "sample_rate": 44100,
+            "extra_args": ["--mdx_segment_size", "128", "--mdx_overlap", "0.25", "--mdx_batch_size", "1"],
+        },
+    }
     DEFAULT_ROFORMER_PREFERENCES = [
         "BS-Roformer-SW.ckpt",
         "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
     ]
+    PANN_LABELS_URL = "https://storage.googleapis.com/us_audioset/youtube_corpus/v1/csv/class_labels_indices.csv"
+    PANN_CHECKPOINT_URL = "https://zenodo.org/record/3987831/files/Cnn14_mAP%3D0.431.pth?download=1"
 
     def __init__(self, root_dir: Path):
         self.root_dir = root_dir
@@ -97,6 +157,11 @@ class RestorationStudioBackend:
         self.audio_separator_model_dir.mkdir(parents=True, exist_ok=True)
         self.hf_cache_dir = self.root_dir / "models" / "huggingface"
         self.hf_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.panns_home_dir = self.root_dir / "models" / "panns-home"
+        self.panns_data_dir = self.panns_home_dir / "panns_data"
+        self.panns_data_dir.mkdir(parents=True, exist_ok=True)
+        self.temp_runtime_dir = self.root_dir / ".tmp_runtime"
+        self.temp_runtime_dir.mkdir(parents=True, exist_ok=True)
 
         self.ffmpeg_location = self.find_ffmpeg()
         self.lock = threading.RLock()
@@ -123,6 +188,9 @@ class RestorationStudioBackend:
         self.enhancement_version = 0
         self.media_revision = 0
         self.last_resolved_roformer_model = "Not resolved yet"
+        self.last_analysis = None
+        self.analysis_engine = "hybrid"
+        self.enable_learned_analysis = True
         # Reserved provider slot for future Apollo integration.
         self.compression_restore_provider = "audiosr"
 
@@ -156,6 +224,11 @@ class RestorationStudioBackend:
                 "downloaded_files": list(self.downloaded_files),
                 "current_export_format": self.export_format,
                 "session_dir": str(self.current_session_dir) if self.current_session_dir else None,
+                "analysis_ready": bool(self.last_analysis),
+                "analysis_summary": self.last_analysis.get("summary", "No analysis yet.") if self.last_analysis else "No analysis yet.",
+                "analysis_recommendation": self.last_analysis.get("recommendation_label", "Analyze source to get guidance.") if self.last_analysis else "Analyze source to get guidance.",
+                "analysis_model_strategy": self.last_analysis.get("ai_model_label", "Balanced") if self.last_analysis else "Balanced",
+                "analysis_engine": self.last_analysis.get("analysis_engine_label", "Hybrid (PANNs + DSP)") if self.last_analysis else "Hybrid (PANNs + DSP)",
             }
 
     def _set_status(self, text, *, progress=None, color=None, error=None, details=None):
@@ -240,6 +313,7 @@ class RestorationStudioBackend:
             self.downloaded_files = [str(target)]
             self.enhancement_history = []
             self.enhancement_version = 0
+            self.last_analysis = None
             self.last_error = None
             self.last_details = ""
             self.progress = 0.0
@@ -474,6 +548,9 @@ class RestorationStudioBackend:
         env["HF_HOME"] = str(self.hf_cache_dir)
         env["TRANSFORMERS_CACHE"] = str(self.hf_cache_dir)
         env["AUDIO_SEPARATOR_MODEL_DIR"] = str(self.audio_separator_model_dir)
+        env["TMP"] = str(self.temp_runtime_dir)
+        env["TEMP"] = str(self.temp_runtime_dir)
+        env["TMPDIR"] = str(self.temp_runtime_dir)
 
         nvidia_paths = [
             r"C:\Program Files\NVIDIA\CUDNN\v9.15\bin\12.9",
@@ -534,6 +611,492 @@ class RestorationStudioBackend:
         except Exception:
             return None
 
+    @contextlib.contextmanager
+    def _panns_home_env(self):
+        keys = ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH")
+        previous = {key: os.environ.get(key) for key in keys}
+        try:
+            os.environ["HOME"] = str(self.panns_home_dir)
+            os.environ["USERPROFILE"] = str(self.panns_home_dir)
+            drive, tail = os.path.splitdrive(str(self.panns_home_dir))
+            if drive:
+                os.environ["HOMEDRIVE"] = drive
+                os.environ["HOMEPATH"] = tail or "\\"
+            yield
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    def _download_if_missing(self, url, destination):
+        destination = Path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists() and destination.stat().st_size > 0:
+            return destination
+        urllib.request.urlretrieve(url, str(destination))
+        if not destination.exists() or destination.stat().st_size == 0:
+            raise RuntimeError(f"Download failed for {destination.name}")
+        return destination
+
+    def _panns_assets_ready(self):
+        labels_csv = self.panns_data_dir / "class_labels_indices.csv"
+        checkpoint = self.panns_data_dir / "Cnn14_mAP=0.431.pth"
+        return labels_csv.exists() and labels_csv.stat().st_size > 0 and checkpoint.exists() and checkpoint.stat().st_size > 250_000_000
+
+    def _ensure_panns_assets(self):
+        labels_csv = self.panns_data_dir / "class_labels_indices.csv"
+        checkpoint = self.panns_data_dir / "Cnn14_mAP=0.431.pth"
+        if not labels_csv.exists() or labels_csv.stat().st_size == 0:
+            raise RuntimeError("Bundled PANNs labels are missing from models/panns-home/panns_data.")
+        if not checkpoint.exists() or checkpoint.stat().st_size <= 250_000_000:
+            raise RuntimeError("Bundled PANNs checkpoint is missing or incomplete in models/panns-home/panns_data.")
+        return labels_csv, checkpoint
+
+    def prepare_learned_analysis_assets(self):
+        self._set_status("Checking bundled learned analysis model...", progress=10, color="blue", error=None, details="")
+        self._ensure_panns_assets()
+        self._set_status("Bundled learned analysis model is ready.", progress=100, color="green", error=None, details="")
+
+    def _panns_available(self):
+        import importlib.util
+
+        return importlib.util.find_spec("panns_inference") is not None
+
+    def _load_panns_labels(self, labels_csv):
+        labels = []
+        with open(labels_csv, "r", newline="", encoding="utf-8") as handle:
+            reader = csv.reader(handle, delimiter=",")
+            next(reader, None)
+            for row in reader:
+                if len(row) >= 3:
+                    labels.append(row[2])
+        return labels
+
+    @staticmethod
+    def _safe_db(value, floor=-120.0):
+        value = float(value)
+        if value <= 1e-12:
+            return floor
+        return 20.0 * np.log10(value)
+
+    def _gpu_vram_gb(self):
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                return 0.0
+            props = torch.cuda.get_device_properties(0)
+            return round(props.total_memory / (1024 ** 3), 1)
+        except Exception:
+            return 0.0
+
+    def _read_analysis_probe(self, file_path, target_sr=22050, segment_seconds=12):
+        import soundfile as sf
+
+        analysis_path = file_path
+        temp_probe = None
+        try:
+            try:
+                handle = sf.SoundFile(analysis_path)
+            except Exception:
+                temp_probe = tempfile.NamedTemporaryFile(
+                    prefix="analysis_probe_",
+                    suffix=".wav",
+                    dir=str(self.temp_runtime_dir),
+                    delete=False,
+                )
+                temp_probe.close()
+                converted = temp_probe.name
+                cmd = [
+                    self._ffmpeg_executable(), "-y",
+                    "-i", file_path,
+                    "-ar", str(target_sr),
+                    "-ac", "1",
+                    "-c:a", "pcm_s16le",
+                    converted,
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode != 0 or not os.path.exists(converted):
+                    detail = result.stderr[-1000:] if result.stderr else "Unknown FFmpeg error"
+                    raise RuntimeError(f"Failed to prepare audio for analysis:\n{detail}")
+                analysis_path = converted
+                handle = sf.SoundFile(analysis_path)
+
+            with handle:
+                sample_rate = int(handle.samplerate)
+                total_frames = len(handle)
+                duration = total_frames / float(sample_rate)
+                starts = [0.0]
+                if duration > segment_seconds * 2.5:
+                    starts.append(max(0.0, (duration * 0.5) - (segment_seconds * 0.5)))
+                if duration > segment_seconds * 4:
+                    starts.append(max(0.0, duration - segment_seconds))
+
+                segments = []
+                unique_starts = []
+                for start in starts:
+                    key = round(start, 2)
+                    if key in unique_starts:
+                        continue
+                    unique_starts.append(key)
+                    handle.seek(int(start * sample_rate))
+                    frames = handle.read(int(segment_seconds * sample_rate), dtype="float32", always_2d=True)
+                    if frames.size == 0:
+                        continue
+                    mono = np.mean(frames, axis=1)
+                    if sample_rate != target_sr:
+                        mono = scipy.signal.resample_poly(mono, target_sr, sample_rate).astype(np.float32)
+                    segments.append(mono.astype(np.float32))
+        finally:
+            if temp_probe and os.path.exists(temp_probe.name):
+                try:
+                    os.remove(temp_probe.name)
+                except OSError:
+                    pass
+
+        if not segments:
+            raise RuntimeError("Could not read audio for analysis.")
+        probe = np.concatenate(segments)
+        if probe.size > target_sr * 45:
+            probe = probe[: target_sr * 45]
+        return {
+            "sample_rate": target_sr,
+            "duration_seconds": duration,
+            "samples": np.clip(probe, -1.0, 1.0),
+        }
+
+    def _analyze_signal(self, file_path):
+        analysis_input = self._read_analysis_probe(file_path)
+        x = analysis_input["samples"]
+        sr = analysis_input["sample_rate"]
+        if x.ndim != 1 or x.size < sr:
+            raise RuntimeError("Not enough audio content to analyze.")
+
+        x = x - np.mean(x)
+        abs_x = np.abs(x)
+        rms = float(np.sqrt(np.mean(np.square(x)) + 1e-12))
+        peak = float(np.max(abs_x) + 1e-12)
+        dynamic_range_db = float(np.clip(self._safe_db(np.percentile(abs_x, 95) + 1e-9) - self._safe_db(np.percentile(abs_x, 20) + 1e-9), 0.0, 60.0))
+
+        win = 2048
+        hop = 1024
+        window = np.hanning(win).astype(np.float32)
+        spectra = []
+        for start in range(0, max(x.size - win, 1), hop):
+            frame = x[start : start + win]
+            if frame.size < win:
+                break
+            spectrum = np.abs(np.fft.rfft(frame * window))
+            spectra.append(spectrum)
+        if not spectra:
+            raise RuntimeError("Failed to compute the analysis spectrum.")
+        mag = np.stack(spectra)
+        mean_mag = np.mean(mag, axis=0)
+        freqs = np.fft.rfftfreq(win, d=1.0 / sr)
+        total_energy = float(np.sum(mean_mag) + 1e-9)
+        centroid_hz = float(np.sum(freqs * mean_mag) / total_energy)
+        cumulative = np.cumsum(mean_mag)
+        rolloff_index = int(np.searchsorted(cumulative, cumulative[-1] * 0.85))
+        rolloff_hz = float(freqs[min(rolloff_index, freqs.size - 1)])
+
+        high_band_mask = freqs >= min(8000, sr * 0.35)
+        mid_band_mask = (freqs >= 1500) & (freqs < min(8000, sr * 0.35))
+        high_ratio = float(np.sum(mean_mag[high_band_mask]) / total_energy)
+        mid_ratio = float(np.sum(mean_mag[mid_band_mask]) / total_energy)
+        high_band = mean_mag[high_band_mask]
+        if high_band.size:
+            flatness = float(np.exp(np.mean(np.log(high_band + 1e-9))) / (np.mean(high_band) + 1e-9))
+        else:
+            flatness = 0.0
+
+        def hum_score(base_hz):
+            score = 0.0
+            for harmonic in range(1, 5):
+                target = base_hz * harmonic
+                idx = int(np.argmin(np.abs(freqs - target)))
+                lo = max(0, idx - 1)
+                hi = min(mean_mag.size, idx + 2)
+                band = float(np.mean(mean_mag[lo:hi]))
+                n_lo = max(0, idx - 8)
+                n_hi = min(mean_mag.size, idx + 9)
+                neighborhood = np.concatenate([mean_mag[n_lo:lo], mean_mag[hi:n_hi]])
+                baseline = float(np.median(neighborhood)) if neighborhood.size else 1e-9
+                score += max(0.0, (band / (baseline + 1e-9)) - 1.0)
+            return min(score / 8.0, 1.0)
+
+        deriv = np.abs(np.diff(x))
+        click_threshold = max(float(np.percentile(deriv, 99.8)), 0.12)
+        click_events = int(np.sum(deriv > click_threshold))
+        click_density = click_events / max(x.size / sr, 1.0)
+        click_score = float(min(click_density / 16.0, 1.0))
+
+        hiss_score = float(np.clip((high_ratio * 5.5) + (flatness * 0.55), 0.0, 1.0))
+        dullness_score = float(np.clip(max(0.0, 9000.0 - rolloff_hz) / 5500.0, 0.0, 1.0))
+        compression_score = float(np.clip((dullness_score * 0.65) + max(0.0, 12.0 - dynamic_range_db) / 20.0, 0.0, 1.0))
+
+        hum_50 = hum_score(50)
+        hum_60 = hum_score(60)
+        hum_frequency = 60 if hum_60 >= hum_50 else 50
+        hum_strength = max(hum_50, hum_60)
+
+        issues = []
+        if hum_strength >= 0.22:
+            issues.append(("hum", hum_strength))
+        if click_score >= 0.16:
+            issues.append(("clicks", click_score))
+        if hiss_score >= 0.18:
+            issues.append(("hiss", hiss_score))
+        if compression_score >= 0.40:
+            issues.append(("bandwidth loss", compression_score))
+        issues.sort(key=lambda item: item[1], reverse=True)
+
+        return {
+            "duration_seconds": round(float(analysis_input["duration_seconds"]), 1),
+            "analysis_sample_rate": sr,
+            "rms_db": round(self._safe_db(rms), 1),
+            "peak_db": round(self._safe_db(peak), 1),
+            "dynamic_range_db": round(dynamic_range_db, 1),
+            "spectral_centroid_hz": round(centroid_hz, 0),
+            "rolloff_hz": round(rolloff_hz, 0),
+            "high_ratio": round(high_ratio, 4),
+            "mid_ratio": round(mid_ratio, 4),
+            "flatness": round(flatness, 4),
+            "hum_50_score": round(hum_50, 3),
+            "hum_60_score": round(hum_60, 3),
+            "hum_frequency": hum_frequency,
+            "hum_strength": round(hum_strength, 3),
+            "click_score": round(click_score, 3),
+            "hiss_score": round(hiss_score, 3),
+            "dullness_score": round(dullness_score, 3),
+            "compression_score": round(compression_score, 3),
+            "issues": issues,
+        }
+
+    def _analyze_with_panns(self, file_path):
+        labels_csv, checkpoint = self._ensure_panns_assets()
+        with self._panns_home_env():
+            from panns_inference import AudioTagging
+
+        analysis_input = self._read_analysis_probe(file_path, target_sr=32000, segment_seconds=8)
+        audio = analysis_input["samples"].astype(np.float32)[None, :]
+        device = "cuda" if self._gpu_vram_gb() > 0 else "cpu"
+        with self._panns_home_env():
+            tagger = AudioTagging(checkpoint_path=str(checkpoint), device=device)
+        clipwise_output, embedding = tagger.inference(audio)
+        scores = clipwise_output[0]
+        labels = self._load_panns_labels(labels_csv)
+        pairs = sorted(zip(labels, scores), key=lambda item: float(item[1]), reverse=True)
+        top_tags = [(label, float(score)) for label, score in pairs[:12]]
+
+        groups = {
+            "music": {
+                "Music",
+                "Song",
+                "Singing",
+                "Vocal music",
+                "Musical instrument",
+                "Piano",
+                "Guitar",
+                "Violin, fiddle",
+            },
+            "speech": {
+                "Speech",
+                "Narration, monologue",
+                "Conversation",
+                "Male speech, man speaking",
+                "Female speech, woman speaking",
+            },
+            "noise": {
+                "Noise",
+                "Static",
+                "Hiss",
+                "Hum",
+                "Buzz",
+                "Crackle",
+                "Distortion",
+            },
+            "reverb": {
+                "Reverberation",
+                "Echo",
+                "Inside, large room or hall",
+                "Cavern, echo",
+            },
+        }
+        group_scores = {}
+        for key, names in groups.items():
+            group_scores[key] = max((float(score) for label, score in top_tags if label in names), default=0.0)
+        return {
+            "top_tags": top_tags,
+            "embedding_norm": float(np.linalg.norm(embedding[0])),
+            "music_score": group_scores["music"],
+            "speech_score": group_scores["speech"],
+            "noise_score": group_scores["noise"],
+            "reverb_score": group_scores["reverb"],
+            "engine": "PANNs Cnn14",
+        }
+
+    def _recommended_ai_strategy(self, analysis):
+        duration = float(analysis.get("duration_seconds", 0.0))
+        vram_gb = self._gpu_vram_gb()
+        if vram_gb <= 0.0:
+            return "low_vram" if duration >= 180 else "balanced"
+        if vram_gb and vram_gb < 7.0:
+            return "low_vram"
+        if duration >= 420:
+            return "low_vram"
+        if duration >= 240:
+            return "balanced"
+        if analysis.get("compression_score", 0.0) >= 0.6:
+            return "low_vram"
+        if analysis.get("click_score", 0.0) >= 0.35:
+            return "balanced"
+        return "quality"
+
+    def _recommend_from_analysis(self, analysis):
+        hum_strength = float(analysis.get("hum_strength", 0.0))
+        click_score = float(analysis.get("click_score", 0.0))
+        hiss_score = float(analysis.get("hiss_score", 0.0))
+        compression_score = float(analysis.get("compression_score", 0.0))
+        duration = float(analysis.get("duration_seconds", 0.0))
+        panns = analysis.get("panns") or {}
+        speech_score = float(panns.get("speech_score", 0.0))
+        reverb_score = float(panns.get("reverb_score", 0.0))
+        noise_score_panns = float(panns.get("noise_score", 0.0))
+
+        if compression_score >= 0.62 and max(hum_strength, click_score, hiss_score) < 0.38:
+            profile = "compression"
+        elif max(hum_strength, click_score, hiss_score) >= 0.18:
+            profile = "restore"
+        else:
+            profile = "enhance"
+
+        noise_score = max(hum_strength, click_score, hiss_score, noise_score_panns * 0.7)
+        if noise_score >= 0.65:
+            preset = "archive"
+        elif noise_score >= 0.42:
+            preset = "heavy"
+        elif noise_score >= 0.24:
+            preset = "medium"
+        else:
+            preset = "light"
+
+        ai_model_preset = self._recommended_ai_strategy(analysis)
+        defaults = copy.deepcopy(self.PROFILE_DEFAULTS[profile])
+        defaults["restoration_preset"] = preset
+        defaults["hum_frequency"] = int(analysis.get("hum_frequency", 60))
+        defaults["ai_model_preset"] = ai_model_preset
+        defaults["restoration_cleanup"] = profile == "restore" or noise_score >= 0.22
+        defaults["stem_rebalance"] = profile in {"stem"} or (profile in {"restore", "enhance"} and compression_score >= 0.45 and duration <= 480)
+        defaults["bandwidth_restore"] = profile in {"compression", "advanced"} or (compression_score >= 0.72 and duration <= 140)
+        if duration > 180:
+            defaults["bandwidth_restore"] = False
+        defaults["ai_dereverb"] = reverb_score >= 0.35
+        defaults["backend"] = "roformer"
+        if profile == "compression":
+            defaults["clarity_mastering"] = True
+            defaults["normalize_audio"] = True
+            defaults["treble_boost"] = max(defaults.get("treble_boost", 0), 1)
+        if speech_score > 0.65 and panns.get("music_score", 0.0) < 0.45:
+            defaults["stem_rebalance"] = False
+            defaults["clarity_mastering"] = False
+        recommendation_label = self.PROFILE_LABELS[profile]
+        model_label = self.AI_MODEL_PRESET_LABELS[ai_model_preset]
+        issue_names = [name for name, _score in analysis.get("issues", [])]
+        if issue_names:
+            issue_text = ", ".join(issue_names[:3])
+            summary = f"Detected {issue_text}. Recommended: {recommendation_label} with {model_label} strategy."
+        else:
+            summary = f"Source looks fairly clean. Recommended: {recommendation_label} with {model_label} strategy."
+        return {
+            "profile": profile,
+            "options": defaults,
+            "summary": summary,
+            "recommendation_label": recommendation_label,
+            "ai_model_label": model_label,
+        }
+
+    def _format_analysis_details(self, analysis, recommendation):
+        issue_lines = []
+        for name, strength in analysis.get("issues", []):
+            issue_lines.append(f"- {name}: {strength:.2f}")
+        if not issue_lines:
+            issue_lines.append("- no dominant defect pattern detected")
+        panns = analysis.get("panns") or {}
+        panns_lines = []
+        for label, score in panns.get("top_tags", [])[:6]:
+            panns_lines.append(f"- {label}: {score:.2f}")
+        if not panns_lines:
+            panns_lines.append(f"- {analysis.get('panns_error', 'unavailable')}")
+        options = recommendation["options"]
+        return "\n".join(
+            [
+                "Source analysis",
+                f"Duration: {analysis['duration_seconds']:.1f}s",
+                f"Dynamic range: {analysis['dynamic_range_db']:.1f} dB",
+                f"Spectral centroid: {analysis['spectral_centroid_hz']:.0f} Hz",
+                f"High-frequency rolloff: {analysis['rolloff_hz']:.0f} Hz",
+                f"Hum estimate: {analysis['hum_strength']:.2f} at {analysis['hum_frequency']} Hz",
+                f"Clicks estimate: {analysis['click_score']:.2f}",
+                f"Hiss estimate: {analysis['hiss_score']:.2f}",
+                f"Compression estimate: {analysis['compression_score']:.2f}",
+                "",
+                "Detected issues:",
+                *issue_lines,
+                "",
+                "PANNs learned cues:",
+                *panns_lines,
+                "",
+                "Recommended plan",
+                f"- Profile: {self.PROFILE_LABELS[recommendation['profile']]}",
+                f"- Analysis engine: {analysis.get('analysis_engine_label', 'Hybrid (PANNs + DSP)')}",
+                f"- Model strategy: {self.AI_MODEL_PRESET_LABELS[options['ai_model_preset']]}",
+                f"- Restore strength: {self.RESTORATION_PRESET_LABELS[options['restoration_preset']]}",
+                f"- Hum frequency: {options['hum_frequency']} Hz",
+                f"- Dereverb: {'on' if options.get('ai_dereverb') else 'off'}",
+                f"- Stem rebalance: {'on' if options['stem_rebalance'] else 'off'}",
+                f"- Bandwidth restore: {'on' if options['bandwidth_restore'] else 'off'}",
+                "",
+                "Model note",
+                "AudioSR remains experimental and is held back on long tracks to avoid slow or memory-heavy runs.",
+            ]
+        )
+
+    def analyze_current_source(self):
+        source_path = self.current_file or self.source_file
+        if not source_path or not os.path.exists(source_path):
+            raise RuntimeError("Download or import a song first.")
+        self._set_status("Running source analysis...", progress=8, color="blue", error=None, details="")
+        analysis = self._analyze_signal(source_path)
+        analysis["analysis_engine_label"] = "DSP heuristics"
+        if self.enable_learned_analysis and self._panns_available():
+            try:
+                if self._panns_assets_ready():
+                    self._set_status("Running learned PANNs analysis...", progress=28, color="blue", error=None, details="")
+                    analysis["panns"] = self._analyze_with_panns(source_path)
+                    analysis["analysis_engine_label"] = "Hybrid (PANNs + DSP)"
+                else:
+                    analysis["panns_error"] = "Bundled PANNs model is not available locally; using DSP fallback."
+            except Exception as exc:
+                analysis["panns_error"] = str(exc)
+        recommendation = self._recommend_from_analysis(analysis)
+        analysis_record = {
+            **analysis,
+            **recommendation,
+            "details": self._format_analysis_details(analysis, recommendation),
+            "analysis_engine_label": analysis.get("analysis_engine_label", "DSP heuristics"),
+        }
+        self.last_analysis = analysis_record
+        self.profile = recommendation["profile"]
+        self._set_status(
+            recommendation["summary"],
+            progress=100,
+            color="green",
+            error=None,
+            details=analysis_record["details"],
+        )
+
     def _list_separator_models(self):
         result = self._run_optional_command(
             ["audio-separator", "--list_models", "--list_format", "json"],
@@ -541,26 +1104,51 @@ class RestorationStudioBackend:
         )
         return json.loads(result.stdout)
 
-    def resolve_roformer_model(self):
+    def _collect_separator_model_map(self):
         try:
             model_list = self._list_separator_models()
         except Exception:
-            self.last_resolved_roformer_model = "audio-separator package default"
-            return None
+            return {}
 
         available = {}
         for family_name, family_models in model_list.items():
             for model_name, model_info in family_models.items():
                 filename = model_info.get("filename")
-                search_blob = f"{family_name} {model_name} {filename or ''}".lower()
-                if filename and "roformer" in search_blob:
-                    available[filename] = model_name
-        for filename in self.DEFAULT_ROFORMER_PREFERENCES:
-            if filename in available:
-                self.last_resolved_roformer_model = f"{available[filename]} ({filename})"
+                if not filename:
+                    continue
+                available[filename] = {
+                    "name": model_name,
+                    "family": family_name,
+                    "search_blob": f"{family_name} {model_name} {filename}".lower(),
+                }
+        return available
+
+    def resolve_separator_model(self, preferred_filenames):
+        available = self._collect_separator_model_map()
+        for filename in preferred_filenames:
+            info = available.get(filename)
+            if info:
+                self.last_resolved_roformer_model = f"{info['name']} ({filename})"
                 return filename
+        if preferred_filenames:
+            fallback = preferred_filenames[0]
+            self.last_resolved_roformer_model = f"Requested model ({fallback})"
+            return fallback
         self.last_resolved_roformer_model = "audio-separator package default"
         return None
+
+    def resolve_separator_model_by_terms(self, required_terms):
+        available = self._collect_separator_model_map()
+        terms = [term.lower() for term in required_terms]
+        for filename, info in available.items():
+            blob = info["search_blob"]
+            if all(term in blob for term in terms):
+                self.last_resolved_roformer_model = f"{info['name']} ({filename})"
+                return filename
+        return None
+
+    def resolve_roformer_model(self):
+        return self.resolve_separator_model(self.DEFAULT_ROFORMER_PREFERENCES)
 
     def _normalize_restoration_preset(self, value):
         value = (value or "medium").strip().lower()
@@ -896,36 +1484,74 @@ class RestorationStudioBackend:
         finally:
             shutil.rmtree(output_dir, ignore_errors=True)
 
-    def separate_audio_roformer_cli(self, file_path):
+    def _run_separator_model(self, file_path, preferred_model, *, label, sample_rate, extra_args, progress=42):
+        output_dir = tempfile.mkdtemp(prefix="ai_separator_")
+        self.update_ai_progress(label, progress)
+        command = [
+            "audio-separator",
+            file_path,
+            "--model_file_dir", str(self.audio_separator_model_dir),
+            "--output_format", "WAV",
+            "--output_dir", output_dir,
+            "--sample_rate", str(sample_rate),
+            "--log_level", "warning",
+        ]
+        if preferred_model:
+            command.extend(["--model_filename", preferred_model])
+        command.extend(extra_args)
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                command.append("--use_autocast")
+        except Exception:
+            pass
+        self._run_optional_command(
+            command,
+            "audio-separator is not installed. Install it with:\n  pip install audio-separator",
+        )
+        return output_dir
+
+    def apply_roformer_dereverb(self, file_path):
+        preferred_model = self.resolve_separator_model_by_terms(["dereverb"])
+        if not preferred_model:
+            raise RuntimeError("No RoFormer dereverb model is available in the installed separator registry.")
+        output_dir = self._run_separator_model(
+            file_path,
+            preferred_model,
+            label="Running dereverb model",
+            sample_rate=48000,
+            extra_args=["--mdxc_segment_size", "256", "--mdxc_overlap", "8", "--mdxc_batch_size", "1"],
+            progress=38,
+        )
+        try:
+            enhanced = self._find_newest_audio_file(output_dir, exclude_paths=[file_path])
+            if not enhanced:
+                raise RuntimeError("The dereverb model finished but did not create an output file.")
+            if os.path.abspath(enhanced) != os.path.abspath(file_path):
+                self._replace_file_with_retry(enhanced, file_path)
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+
+    def separate_audio_roformer_cli(self, file_path, ai_model_preset="balanced"):
         import re
-        import numpy as np
         import soundfile as sf
 
-        output_dir = tempfile.mkdtemp(prefix="roformer_stems_")
+        output_dir = None
         try:
-            preferred_model = self.resolve_roformer_model()
-            self.update_ai_progress("Running RoFormer stem rebalance", 42)
-            command = [
-                "audio-separator",
+            ai_model_preset = (ai_model_preset or "balanced").strip().lower()
+            if ai_model_preset not in self.AI_MODEL_PRESETS:
+                ai_model_preset = "balanced"
+            preset = self.AI_MODEL_PRESETS[ai_model_preset]
+            preferred_model = self.resolve_separator_model(preset["preferred_models"])
+            label = self.AI_MODEL_PRESET_LABELS[ai_model_preset]
+            output_dir = self._run_separator_model(
                 file_path,
-                "--model_file_dir", str(self.audio_separator_model_dir),
-                "--output_format", "WAV",
-                "--output_dir", output_dir,
-                "--sample_rate", "48000",
-                "--log_level", "warning",
-            ]
-            if preferred_model:
-                command.extend(["--model_filename", preferred_model])
-            try:
-                import torch
-
-                if torch.cuda.is_available():
-                    command.append("--use_autocast")
-            except Exception:
-                pass
-            self._run_optional_command(
-                command,
-                "audio-separator is not installed. Install it with:\n  pip install audio-separator",
+                preferred_model,
+                label=f"Running {label} stem model",
+                sample_rate=preset["sample_rate"],
+                extra_args=preset["extra_args"],
+                progress=42,
             )
 
             stem_files = {}
@@ -940,7 +1566,7 @@ class RestorationStudioBackend:
                     stem_files["instrumental"] = candidate
 
             if not stem_files:
-                raise RuntimeError("RoFormer separation did not produce any recognized stems.")
+                raise RuntimeError("Stem separation did not produce any recognized stems.")
 
             if "vocals" in stem_files and "instrumental" in stem_files:
                 filters = (
@@ -961,12 +1587,12 @@ class RestorationStudioBackend:
                 result = subprocess.run(cmd, capture_output=True, text=True)
                 if result.returncode != 0 or not os.path.exists(temp_mix):
                     detail = result.stderr[-1200:] if result.stderr else "Unknown FFmpeg error"
-                    raise RuntimeError(f"Failed to recombine RoFormer stems:\n{detail}")
+                    raise RuntimeError(f"Failed to recombine stems:\n{detail}")
                 self._replace_file_with_retry(temp_mix, file_path)
                 return
 
             if "vocals" not in stem_files:
-                raise RuntimeError("RoFormer produced stems, but no vocals stem was found for recombination.")
+                raise RuntimeError("The stem model ran, but no vocals stem was found for recombination.")
 
             original_audio, original_sr = sf.read(file_path, always_2d=True)
             target_channels = original_audio.shape[1]
@@ -997,7 +1623,7 @@ class RestorationStudioBackend:
                     resample = subprocess.run(cmd, capture_output=True, text=True)
                     if resample.returncode != 0 or not os.path.exists(converted):
                         detail = resample.stderr[-1000:] if resample.stderr else "Unknown FFmpeg error"
-                        raise RuntimeError(f"Failed to resample RoFormer stem '{stem_name}':\n{detail}")
+                        raise RuntimeError(f"Failed to resample stem '{stem_name}':\n{detail}")
                     stem_audio, _ = sf.read(converted, always_2d=True)
 
                 stem = stem_audio.T.astype(np.float32)
@@ -1021,14 +1647,15 @@ class RestorationStudioBackend:
             cleaned = np.clip(cleaned, -0.99, 0.99)
             sf.write(file_path, cleaned.T, original_sr, subtype="PCM_16")
         finally:
-            shutil.rmtree(output_dir, ignore_errors=True)
+            if output_dir:
+                shutil.rmtree(output_dir, ignore_errors=True)
 
     def _normalize_options(self, raw):
         profile = raw.get("profile", self.profile)
         if profile not in self.PROFILE_DEFAULTS:
             profile = "restore"
         options = copy.deepcopy(self.PROFILE_DEFAULTS[profile])
-        for key in ("restoration_cleanup", "clarity_mastering", "normalize_audio", "stem_rebalance", "bandwidth_restore"):
+        for key in ("restoration_cleanup", "clarity_mastering", "normalize_audio", "stem_rebalance", "bandwidth_restore", "ai_dereverb"):
             if key in raw:
                 options[key] = bool(raw.get(key))
         for key in ("bass_boost", "treble_boost", "volume_boost"):
@@ -1041,6 +1668,8 @@ class RestorationStudioBackend:
             options["restoration_preset"] = self._normalize_restoration_preset(raw.get("restoration_preset"))
         if "hum_frequency" in raw:
             options["hum_frequency"] = self._normalize_hum_frequency(raw.get("hum_frequency"))
+        ai_model_preset = raw.get("ai_model_preset", options.get("ai_model_preset", "balanced"))
+        options["ai_model_preset"] = ai_model_preset if ai_model_preset in self.AI_MODEL_PRESETS else "balanced"
         backend = raw.get("backend", options["backend"])
         options["backend"] = backend if backend in {"roformer", "demucs_legacy"} else "roformer"
 
@@ -1051,12 +1680,17 @@ class RestorationStudioBackend:
                 options["normalize_audio"] = False
                 options["stem_rebalance"] = True
                 options["bandwidth_restore"] = False
+                options["ai_dereverb"] = False
+            elif profile == "compression":
+                options["backend"] = "roformer"
             elif profile == "enhance":
                 options["bandwidth_restore"] = False
                 options["backend"] = "roformer"
             elif profile == "restore":
                 options["backend"] = "roformer"
-        if profile not in {"restore", "advanced"}:
+        if profile == "compression":
+            options["ai_dereverb"] = False
+        if profile not in {"restore", "advanced", "compression"}:
             options["bandwidth_restore"] = False
         if profile != "advanced" and options["backend"] == "demucs_legacy":
             options["backend"] = "roformer"
@@ -1078,7 +1712,13 @@ class RestorationStudioBackend:
         temp_work = os.path.join(temp_dir, "working.wav")
         try:
             self.profile = profile
-            self._set_status("Preparing lossless working master...", progress=5, color="blue", error=None, details="")
+            duration_seconds = self._estimate_audio_duration_seconds(previous_file)
+            if duration_seconds and duration_seconds > 240:
+                minutes = int(round(duration_seconds / 60.0))
+                prep_msg = f"Preparing lossless working master for a {minutes} min track (this can take a while)..."
+            else:
+                prep_msg = "Preparing lossless working master (first pass may take up to a minute)..."
+            self._set_status(prep_msg, progress=5, color="blue", error=None, details="")
             self._convert_to_work_wav(previous_file, temp_work)
 
             if profile == "restore":
@@ -1089,11 +1729,13 @@ class RestorationStudioBackend:
                         hum_frequency=options["hum_frequency"],
                         base_progress=14,
                     )
+                if options["ai_dereverb"]:
+                    self.apply_roformer_dereverb(temp_work)
                 if options["stem_rebalance"]:
                     if options["backend"] == "demucs_legacy":
                         self.separate_audio_demucs_cli(temp_work)
                     else:
-                        self.separate_audio_roformer_cli(temp_work)
+                        self.separate_audio_roformer_cli(temp_work, options["ai_model_preset"])
                 if options["bandwidth_restore"]:
                     duration_seconds = self._estimate_audio_duration_seconds(temp_work)
                     if duration_seconds and duration_seconds > 180:
@@ -1117,6 +1759,8 @@ class RestorationStudioBackend:
                 )
                 self._apply_stage_filters(temp_work, "Applying conservative mastering", mastering_filters, 86)
             elif profile == "enhance":
+                if options["ai_dereverb"]:
+                    self.apply_roformer_dereverb(temp_work)
                 mastering_filters = self._build_mastering_filters(
                     conservative=False,
                     clarity_mastering=options["clarity_mastering"],
@@ -1127,10 +1771,44 @@ class RestorationStudioBackend:
                 )
                 self._apply_stage_filters(temp_work, "Applying clarity and mastering", mastering_filters, 22)
                 if options["stem_rebalance"]:
-                    self.separate_audio_roformer_cli(temp_work)
+                    self.separate_audio_roformer_cli(temp_work, options["ai_model_preset"])
+            elif profile == "compression":
+                if options["restoration_cleanup"]:
+                    self.apply_restoration_pipeline(
+                        temp_work,
+                        preset=options["restoration_preset"],
+                        hum_frequency=options["hum_frequency"],
+                        base_progress=12,
+                    )
+                if options["ai_dereverb"]:
+                    self.apply_roformer_dereverb(temp_work)
+                if options["stem_rebalance"]:
+                    self.separate_audio_roformer_cli(temp_work, options["ai_model_preset"])
+                if options["bandwidth_restore"]:
+                    duration_seconds = self._estimate_audio_duration_seconds(temp_work)
+                    if duration_seconds and duration_seconds > 180:
+                        self.update_ai_progress("Bandwidth restore skipped for long track", 70, color="orange")
+                    else:
+                        try:
+                            self.update_ai_progress("Bandwidth repair", 66, color="purple")
+                            self.apply_bandwidth_restore(temp_work)
+                        except Exception as exc:
+                            if self._is_memory_pressure_error(exc):
+                                self.update_ai_progress("Bandwidth repair skipped due to memory limits", 74, color="orange")
+                            else:
+                                raise
+                mastering_filters = self._build_mastering_filters(
+                    conservative=False,
+                    clarity_mastering=options["clarity_mastering"],
+                    normalize_audio=options["normalize_audio"],
+                    bass_boost=options["bass_boost"],
+                    treble_boost=options["treble_boost"],
+                    volume_boost=options["volume_boost"],
+                )
+                self._apply_stage_filters(temp_work, "Applying repair mastering", mastering_filters, 84)
             elif profile == "stem":
                 self.update_ai_progress("Stem rebalance", 24, color="purple")
-                self.separate_audio_roformer_cli(temp_work)
+                self.separate_audio_roformer_cli(temp_work, options["ai_model_preset"])
             else:
                 if options["restoration_cleanup"]:
                     self.apply_restoration_pipeline(
@@ -1139,11 +1817,13 @@ class RestorationStudioBackend:
                         hum_frequency=options["hum_frequency"],
                         base_progress=12,
                     )
+                if options["ai_dereverb"]:
+                    self.apply_roformer_dereverb(temp_work)
                 if options["stem_rebalance"]:
                     if options["backend"] == "demucs_legacy":
                         self.separate_audio_demucs_cli(temp_work)
                     else:
-                        self.separate_audio_roformer_cli(temp_work)
+                        self.separate_audio_roformer_cli(temp_work, options["ai_model_preset"])
                 if options["bandwidth_restore"]:
                     duration_seconds = self._estimate_audio_duration_seconds(temp_work)
                     if duration_seconds and duration_seconds > 180:

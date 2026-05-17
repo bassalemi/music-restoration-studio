@@ -14,24 +14,25 @@ from restoration_backend import ROOT, RestorationStudioBackend
 
 class RestorationStudioTkApp:
     COLOR_MAP = {
-        "slate": "#607D8B",
-        "blue": "#1565C0",
-        "green": "#2E7D32",
-        "orange": "#EF6C00",
-        "red": "#C62828",
+        "slate": "#5B6470",
+        "blue": "#0E7490",
+        "green": "#1D8F53",
+        "orange": "#CC7A00",
+        "red": "#BF2F45",
+        "purple": "#6D5BD0",
     }
-    APP_BG = "#F4F6F8"
-    CARD_BG = "#FFFFFF"
-    ORIGINAL_PANEL_BG = "#FBF7F1"
-    ENHANCED_PANEL_BG = "#F3F8F7"
-    MUTED_TEXT = "#5F6C7B"
-    BODY_TEXT = "#1B2430"
+    APP_BG = "#EEF2F6"
+    CARD_BG = "#FCFDFE"
+    ORIGINAL_PANEL_BG = "#FFF8EE"
+    ENHANCED_PANEL_BG = "#F2FAF8"
+    MUTED_TEXT = "#526171"
+    BODY_TEXT = "#132236"
 
     def __init__(self, root):
         self.root = root
         self.root.title("Music Restoration Studio")
-        self.root.geometry("1060x780")
-        self.root.minsize(960, 720)
+        self.root.geometry("1060x840")
+        self.root.minsize(980, 760)
         self.root.configure(bg=self.APP_BG)
 
         self.backend = RestorationStudioBackend(ROOT)
@@ -39,7 +40,7 @@ class RestorationStudioTkApp:
         self.download_mode = tk.StringVar(value="direct")
         self.browser_source = tk.StringVar(value=self.backend.browser_source)
         self.export_format = tk.StringVar(value="mp3")
-        self.show_details = tk.BooleanVar(value=False)
+        self.ai_model_preset = tk.StringVar(value=RestorationStudioBackend.AI_MODEL_PRESET_LABELS["balanced"])
 
         self.restoration_cleanup = tk.BooleanVar(value=False)
         self.restoration_preset = tk.StringVar(value=RestorationStudioBackend.RESTORATION_PRESET_LABELS["medium"])
@@ -48,10 +49,16 @@ class RestorationStudioTkApp:
         self.normalize_audio = tk.BooleanVar(value=False)
         self.stem_rebalance = tk.BooleanVar(value=False)
         self.bandwidth_restore = tk.BooleanVar(value=False)
+        self.ai_dereverb = tk.BooleanVar(value=False)
         self.backend_choice = tk.StringVar(value="roformer")
         self.bass_boost = tk.IntVar(value=0)
         self.treble_boost = tk.IntVar(value=0)
         self.volume_boost = tk.IntVar(value=0)
+        self.analysis_summary_var = tk.StringVar(value="Analyze a source to get guidance.")
+        self.analysis_recommendation_var = tk.StringVar(value="No recommendation yet")
+        self.analysis_model_var = tk.StringVar(value="Balanced")
+        self.analysis_engine_var = tk.StringVar(value="Hybrid (PANNs + DSP)")
+        self._last_applied_analysis_signature = None
 
         self.playback_kind = None
         self.playback_source = None
@@ -82,17 +89,69 @@ class RestorationStudioTkApp:
             pass
 
         style.configure("App.TFrame", background=self.APP_BG)
-        style.configure("Card.TFrame", background=self.CARD_BG, relief="flat")
-        style.configure("Header.TLabel", background=self.APP_BG, foreground=self.BODY_TEXT, font=("Segoe UI", 20, "bold"))
+        style.configure("Card.TFrame", background=self.CARD_BG, relief="flat", borderwidth=1)
+        style.configure("Header.TLabel", background=self.APP_BG, foreground=self.BODY_TEXT, font=("Segoe UI", 15, "bold"))
         style.configure("Subtle.TLabel", background=self.CARD_BG, foreground=self.MUTED_TEXT, font=("Segoe UI", 9))
         style.configure("CardTitle.TLabel", background=self.CARD_BG, foreground=self.BODY_TEXT, font=("Segoe UI", 11, "bold"))
         style.configure("Section.TLabel", background=self.CARD_BG, foreground=self.MUTED_TEXT, font=("Segoe UI", 9, "bold"))
         style.configure("Body.TLabel", background=self.CARD_BG, foreground=self.BODY_TEXT, font=("Segoe UI", 10))
-        style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"))
+        style.configure(
+            "Primary.TButton",
+            font=("Segoe UI", 10, "bold"),
+            padding=(10, 7),
+            background="#0E7490",
+            foreground="#FFFFFF",
+            bordercolor="#0A5B72",
+            lightcolor="#0E7490",
+            darkcolor="#0A5B72",
+        )
+        style.map(
+            "Primary.TButton",
+            background=[("active", "#0B677E"), ("disabled", "#C8D6E0")],
+            foreground=[("disabled", "#6B7B89")],
+        )
+        style.configure(
+            "Secondary.TButton",
+            font=("Segoe UI", 10),
+            padding=(10, 7),
+            background="#E4EBF1",
+            foreground="#20334A",
+            bordercolor="#B6C3CF",
+            lightcolor="#E4EBF1",
+            darkcolor="#B6C3CF",
+        )
+        style.map(
+            "Secondary.TButton",
+            background=[("active", "#D8E1EA"), ("disabled", "#E9EEF3")],
+            foreground=[("disabled", "#8895A3")],
+        )
+        style.configure(
+            "ActionSmall.TButton",
+            font=("Segoe UI", 8),
+            padding=(5, 2),
+            background="#E4EBF1",
+            foreground="#20334A",
+            bordercolor="#B6C3CF",
+            lightcolor="#E4EBF1",
+            darkcolor="#B6C3CF",
+        )
+        style.map(
+            "ActionSmall.TButton",
+            background=[("active", "#D8E1EA"), ("disabled", "#E9EEF3")],
+            foreground=[("disabled", "#8895A3")],
+        )
         style.configure("Compact.TRadiobutton", background=self.CARD_BG, font=("Segoe UI", 9))
         style.configure("Compact.TCheckbutton", background=self.CARD_BG, font=("Segoe UI", 9))
         style.configure("TLabelFrame", background=self.CARD_BG)
         style.configure("TLabelFrame.Label", background=self.CARD_BG, foreground=self.BODY_TEXT, font=("Segoe UI", 10, "bold"))
+        style.configure(
+            "Aqua.Horizontal.TProgressbar",
+            troughcolor="#D8E2EC",
+            background="#0E7490",
+            bordercolor="#D8E2EC",
+            lightcolor="#0E7490",
+            darkcolor="#0E7490",
+        )
 
         style.configure("OriginalPanel.TLabelframe", background=self.ORIGINAL_PANEL_BG)
         style.configure("OriginalPanel.TLabelframe.Label", background=self.ORIGINAL_PANEL_BG, foreground=self.BODY_TEXT, font=("Segoe UI", 10, "bold"))
@@ -109,9 +168,11 @@ class RestorationStudioTkApp:
     def _build_ui(self):
         shell = ttk.Frame(self.root, style="App.TFrame", padding=18)
         shell.pack(fill="both", expand=True)
-        shell.columnconfigure(0, weight=3)
-        shell.columnconfigure(1, weight=2)
-        shell.rowconfigure(1, weight=1)
+        shell.columnconfigure(0, weight=8)
+        shell.columnconfigure(1, weight=4)
+        shell.rowconfigure(1, weight=0)
+        shell.rowconfigure(2, weight=0)
+        shell.grid_anchor("nw")
 
         hero = ttk.Frame(shell, style="App.TFrame")
         hero.grid(row=0, column=0, columnspan=2, sticky="ew")
@@ -120,9 +181,9 @@ class RestorationStudioTkApp:
         left = ttk.Frame(shell, style="App.TFrame")
         right = ttk.Frame(shell, style="App.TFrame")
         bottom = ttk.Frame(shell, style="App.TFrame")
-        left.grid(row=1, column=0, sticky="nsew", padx=(0, 10), pady=(14, 0))
-        right.grid(row=1, column=1, sticky="nsew", pady=(14, 0))
-        bottom.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        left.grid(row=1, column=0, sticky="new", padx=(0, 8), pady=(8, 0))
+        right.grid(row=1, column=1, sticky="new", pady=(8, 0))
+        bottom.grid(row=2, column=0, columnspan=2, sticky="new", pady=(0, 0))
         left.columnconfigure(0, weight=1)
         right.columnconfigure(0, weight=1)
         bottom.columnconfigure(0, weight=1)
@@ -133,10 +194,10 @@ class RestorationStudioTkApp:
         self._build_details_card(right)
         self._build_status_card(bottom)
 
-    def _make_card(self, parent, title):
-        frame = ttk.Frame(parent, style="Card.TFrame", padding=10)
-        frame.pack(fill="x", pady=(0, 8))
-        ttk.Label(frame, text=title, style="CardTitle.TLabel").pack(anchor="w", pady=(0, 8))
+    def _make_card(self, parent, title, bottom_pady=8):
+        frame = ttk.Frame(parent, style="Card.TFrame", padding=8)
+        frame.pack(fill="x", pady=(0, bottom_pady))
+        ttk.Label(frame, text=title, style="CardTitle.TLabel").pack(anchor="w", pady=(0, 6))
         return frame
 
     def _build_source_card(self, parent):
@@ -147,11 +208,11 @@ class RestorationStudioTkApp:
         url_row.columnconfigure(0, weight=1)
         self.url_entry = ttk.Entry(url_row)
         self.url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        self.download_button = ttk.Button(url_row, text="Download Source", style="Primary.TButton", command=self.start_download)
+        self.download_button = ttk.Button(url_row, text="Download", width=14, style="ActionSmall.TButton", command=self.start_download)
         self.download_button.grid(row=0, column=1)
 
         session_row = ttk.Frame(card, style="Card.TFrame")
-        session_row.pack(fill="x", pady=(8, 0))
+        session_row.pack(fill="x", pady=(6, 0))
         ttk.Label(session_row, text="Download Session Source", style="Section.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Radiobutton(
             session_row, text="Direct", value="direct", variable=self.download_mode, style="Compact.TRadiobutton",
@@ -173,14 +234,14 @@ class RestorationStudioTkApp:
         self.browser_combo.set(self.browser_source.get().capitalize())
 
         import_row = ttk.Frame(card, style="Card.TFrame")
-        import_row.pack(fill="x", pady=(8, 0))
+        import_row.pack(fill="x", pady=(6, 0))
         import_row.columnconfigure(0, weight=1)
         self.import_path_var = tk.StringVar(value="No local file selected")
         ttk.Label(import_row, textvariable=self.import_path_var, style="Subtle.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Button(import_row, text="Import File", command=self.import_file).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(import_row, text="Import File", width=14, style="ActionSmall.TButton", command=self.import_file).grid(row=0, column=1, padx=(8, 0))
 
     def _build_profile_card(self, parent):
-        card = self._make_card(parent, "Processing Profile")
+        card = self._make_card(parent, "Processing Plan", bottom_pady=0)
 
         top = ttk.Frame(card, style="Card.TFrame")
         top.pack(fill="x")
@@ -196,7 +257,7 @@ class RestorationStudioTkApp:
         self.profile_combo.set(RestorationStudioBackend.PROFILE_LABELS["restore"])
 
         toggles = ttk.Frame(card, style="Card.TFrame")
-        toggles.pack(fill="x", pady=(8, 0))
+        toggles.pack(fill="x", pady=(6, 0))
         toggles.columnconfigure(0, weight=1)
         toggles.columnconfigure(1, weight=1)
 
@@ -215,25 +276,28 @@ class RestorationStudioTkApp:
         self.normalize_check = ttk.Checkbutton(
             toggles, text="Normalize loudness", variable=self.normalize_audio, style="Compact.TCheckbutton"
         )
-        self.normalize_check.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.normalize_check.grid(row=1, column=0, sticky="w", pady=(2, 0))
         self.stem_check = ttk.Checkbutton(
             toggles, text="Stem Rebalance", variable=self.stem_rebalance, style="Compact.TCheckbutton",
             command=self._sync_profile_rules
         )
-        self.stem_check.grid(row=1, column=1, sticky="w", pady=(4, 0))
+        self.stem_check.grid(row=1, column=1, sticky="w", pady=(2, 0))
         self.bandwidth_check = ttk.Checkbutton(
-            toggles, text="Bandwidth Restore (Experimental)", variable=self.bandwidth_restore, style="Compact.TCheckbutton"
+            toggles, text="Bandwidth Restore", variable=self.bandwidth_restore, style="Compact.TCheckbutton"
         )
-        self.bandwidth_check.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.bandwidth_check.grid(row=2, column=0, sticky="w", pady=(2, 0))
+        self.dereverb_check = ttk.Checkbutton(
+            toggles, text="Dereverb", variable=self.ai_dereverb, style="Compact.TCheckbutton"
+        )
+        self.dereverb_check.grid(row=2, column=1, sticky="w", pady=(2, 0))
 
         setup = ttk.Frame(card, style="Card.TFrame")
-        setup.pack(fill="x", pady=(8, 0))
-        for column in range(4):
+        setup.pack(fill="x", pady=(6, 0))
+        for column in range(3):
             setup.columnconfigure(column, weight=1)
         ttk.Label(setup, text="Restore strength", style="Section.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(setup, text="Hum frequency", style="Section.TLabel").grid(row=0, column=1, sticky="w", padx=(12, 0))
-        ttk.Label(setup, text="Stem backend", style="Section.TLabel").grid(row=0, column=2, sticky="w", padx=(12, 0))
-        ttk.Label(setup, text="Export format", style="Section.TLabel").grid(row=0, column=3, sticky="w", padx=(12, 0))
+        ttk.Label(setup, text="Model strategy", style="Section.TLabel").grid(row=0, column=2, sticky="w", padx=(12, 0))
         self.restoration_preset_combo = ttk.Combobox(
             setup,
             textvariable=self.restoration_preset,
@@ -250,32 +314,52 @@ class RestorationStudioTkApp:
             width=9,
         )
         self.hum_combo.grid(row=1, column=1, sticky="ew", padx=(12, 0), pady=(3, 0))
-        self.backend_combo = ttk.Combobox(
+        self.ai_model_combo = ttk.Combobox(
             setup,
+            textvariable=self.ai_model_preset,
+            values=[RestorationStudioBackend.AI_MODEL_PRESET_LABELS[key] for key in RestorationStudioBackend.AI_MODEL_PRESET_ORDER],
+            state="readonly",
+            width=16,
+        )
+        self.ai_model_combo.grid(row=1, column=2, sticky="ew", padx=(12, 0), pady=(3, 0))
+
+        lower_setup = ttk.Frame(card, style="Card.TFrame")
+        lower_setup.pack(fill="x", pady=(4, 0))
+        lower_setup.columnconfigure(0, weight=1)
+        lower_setup.columnconfigure(1, weight=1)
+        ttk.Label(lower_setup, text="Stem backend", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(lower_setup, text="Export format", style="Section.TLabel").grid(row=0, column=1, sticky="w", padx=(12, 0))
+        self.backend_combo = ttk.Combobox(
+            lower_setup,
             textvariable=self.backend_choice,
             values=["roformer", "demucs_legacy"],
             state="readonly",
             width=13,
         )
-        self.backend_combo.grid(row=1, column=2, sticky="ew", padx=(12, 0), pady=(3, 0))
+        self.backend_combo.grid(row=1, column=0, sticky="ew", pady=(3, 0))
         self.export_combo = ttk.Combobox(
-            setup,
+            lower_setup,
             textvariable=self.export_format,
             values=["mp3", "wav", "flac"],
             state="readonly",
             width=8,
         )
-        self.export_combo.grid(row=1, column=3, sticky="ew", padx=(12, 0), pady=(3, 0))
+        self.export_combo.grid(row=1, column=1, sticky="ew", padx=(12, 0), pady=(3, 0))
 
         sliders = ttk.Frame(card, style="Card.TFrame")
-        sliders.pack(fill="x", pady=(6, 0))
+        sliders.pack(fill="x", pady=(14, 0))
         sliders.columnconfigure(1, weight=1)
-        sliders.columnconfigure(3, weight=1)
-        sliders.columnconfigure(5, weight=1)
+        sliders.columnconfigure(4, weight=1)
+        sliders.columnconfigure(7, weight=1)
 
         self._build_slider(sliders, 0, "Bass", self.bass_boost)
-        self._build_slider(sliders, 2, "Treble", self.treble_boost)
-        self._build_slider(sliders, 4, "Volume", self.volume_boost)
+        self._build_slider(sliders, 3, "Treble", self.treble_boost)
+        self._build_slider(sliders, 6, "Volume", self.volume_boost)
+
+        # Keep left and right middle sections visually aligned.
+        profile_spacer = ttk.Frame(card, style="Card.TFrame", height=52)
+        profile_spacer.pack(fill="x", pady=(8, 0))
+        profile_spacer.pack_propagate(False)
 
     def _build_slider(self, parent, column, label, variable):
         ttk.Label(parent, text=label, style="Section.TLabel").grid(row=0, column=column, sticky="w", padx=(0, 6))
@@ -289,11 +373,11 @@ class RestorationStudioTkApp:
             bg="#FFFFFF",
             highlightthickness=0,
             variable=variable,
-            length=108,
+            length=64,
         )
-        scale.grid(row=0, column=column + 1, sticky="ew", padx=(0, 12))
+        scale.grid(row=0, column=column + 1, sticky="ew", padx=(0, 6))
         value_label = ttk.Label(parent, text="0 dB", style="Subtle.TLabel")
-        value_label.grid(row=1, column=column, columnspan=2, sticky="w")
+        value_label.grid(row=0, column=column + 2, sticky="w", padx=(0, 8))
         variable.trace_add("write", lambda *args, lbl=value_label, var=variable: lbl.config(text=f"{var.get()} dB"))
 
     def _build_status_card(self, parent):
@@ -302,13 +386,13 @@ class RestorationStudioTkApp:
         self.status_label = ttk.Label(card, textvariable=self.status_text_var, style="Body.TLabel", wraplength=940, justify="left")
         self.status_label.pack(anchor="w")
 
-        self.progress = ttk.Progressbar(card, mode="determinate", maximum=100)
-        self.progress.pack(fill="x", pady=(10, 8))
+        self.progress = ttk.Progressbar(card, mode="determinate", maximum=100, style="Aqua.Horizontal.TProgressbar")
+        self.progress.pack(fill="x", pady=(6, 6))
         self.progress_value_var = tk.StringVar(value="0%")
         ttk.Label(card, textvariable=self.progress_value_var, style="Subtle.TLabel").pack(anchor="w")
 
         grid = ttk.Frame(card, style="Card.TFrame")
-        grid.pack(fill="x", pady=(12, 0))
+        grid.pack(fill="x", pady=(8, 0))
         grid.columnconfigure(0, weight=1)
         grid.columnconfigure(1, weight=1)
         grid.columnconfigure(2, weight=1)
@@ -318,42 +402,57 @@ class RestorationStudioTkApp:
         self.original_name_var = tk.StringVar(value="No original source yet")
         self.enhanced_name_var = tk.StringVar(value="No enhanced version yet")
         self.session_dir_var = tk.StringVar(value="No active session")
-        self._build_stat(grid, 0, 0, "RoFormer Backend", self.roformer_var)
+        self._build_stat(grid, 0, 0, "Model", self.roformer_var)
         self._build_stat(grid, 0, 1, "Original Source", self.original_name_var)
         self._build_stat(grid, 0, 2, "Enhanced Version", self.enhanced_name_var)
         self._build_stat(grid, 0, 3, "Session Folder", self.session_dir_var)
 
     def _build_stat(self, parent, row, column, title, variable):
-        frame = ttk.Frame(parent, style="Card.TFrame", padding=10)
+        frame = ttk.Frame(parent, style="Card.TFrame", padding=6)
         frame.grid(row=row, column=column, sticky="nsew", padx=(0 if column == 0 else 8, 0), pady=0)
         ttk.Label(frame, text=title, style="Section.TLabel").pack(anchor="w")
-        ttk.Label(frame, textvariable=variable, style="Subtle.TLabel", wraplength=205, justify="left").pack(anchor="w", pady=(6, 0))
+        ttk.Label(frame, textvariable=variable, style="Subtle.TLabel", wraplength=195, justify="left").pack(anchor="w", pady=(4, 0))
 
     def _build_actions_card(self, parent):
-        card = self._make_card(parent, "Actions and Compare")
+        card = self._make_card(parent, "Actions and Compare", bottom_pady=0)
         actions = ttk.Frame(card, style="Card.TFrame")
         actions.pack(fill="x")
-        actions.columnconfigure(0, weight=1)
-        actions.columnconfigure(1, weight=1)
-        self.apply_button = ttk.Button(actions, text="Apply Profile", style="Primary.TButton", command=self.apply_profile)
-        self.apply_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self.undo_button = ttk.Button(actions, text="Undo Last", command=self.undo_last)
-        self.undo_button.grid(row=0, column=1, sticky="ew")
-        self.revert_button = ttk.Button(actions, text="Return to Original", command=self.revert_to_original)
-        self.revert_button.grid(row=1, column=0, sticky="ew", padx=(0, 6), pady=(8, 0))
-        self.export_button = ttk.Button(actions, text="Export Current", command=self.export_current)
-        self.export_button.grid(row=1, column=1, sticky="ew", pady=(8, 0))
+        actions.columnconfigure(0, weight=0)
+        actions.columnconfigure(1, weight=0)
+        actions.columnconfigure(2, weight=1)
+        actions.columnconfigure(3, weight=0)
+        button_width = 14
+        self.analyze_button = ttk.Button(
+            actions, text="Analyze Source", width=button_width, style="ActionSmall.TButton", command=self.analyze_source
+        )
+        self.analyze_button.grid(row=0, column=0, sticky="w", padx=(0, 6))
+        self.apply_button = ttk.Button(
+            actions, text="Apply Plan", width=button_width, style="ActionSmall.TButton", command=self.apply_profile
+        )
+        self.apply_button.grid(row=0, column=1, sticky="w", padx=(0, 6))
+        self.export_button = ttk.Button(
+            actions, text="Export Current", width=button_width, style="ActionSmall.TButton", command=self.export_current
+        )
+        self.export_button.grid(row=0, column=3, sticky="e", padx=(10, 0), pady=(1, 0))
+        self.revert_button = ttk.Button(
+            actions, text="Return to Original", width=button_width, style="ActionSmall.TButton", command=self.revert_to_original
+        )
+        self.revert_button.grid(row=1, column=0, sticky="w", padx=(0, 6), pady=(6, 0))
+        self.undo_button = ttk.Button(
+            actions, text="Undo Last", width=button_width, style="ActionSmall.TButton", command=self.undo_last
+        )
+        self.undo_button.grid(row=1, column=1, sticky="w", pady=(6, 0))
 
         compare = ttk.Frame(card, style="Card.TFrame")
-        compare.pack(fill="x", pady=(14, 0))
+        compare.pack(fill="x", pady=(12, 0))
         compare.columnconfigure(0, weight=1)
         compare.columnconfigure(1, weight=1)
 
-        original_frame = ttk.LabelFrame(compare, text="Original", padding=10, style="OriginalPanel.TLabelframe")
+        original_frame = ttk.LabelFrame(compare, text="Original", padding=8, style="OriginalPanel.TLabelframe")
         original_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         self._build_player_panel(original_frame, "original", "Original source")
 
-        enhanced_frame = ttk.LabelFrame(compare, text="Enhanced", padding=10, style="EnhancedPanel.TLabelframe")
+        enhanced_frame = ttk.LabelFrame(compare, text="Enhanced", padding=8, style="EnhancedPanel.TLabelframe")
         enhanced_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
         self._build_player_panel(enhanced_frame, "enhanced", "Latest enhanced version")
 
@@ -367,33 +466,30 @@ class RestorationStudioTkApp:
         time_var = tk.StringVar(value="0:00 / 0:00")
         seek_var = tk.DoubleVar(value=0.0)
 
-        ttk.Label(parent, textvariable=name_var, style=body_style, wraplength=180, justify="left").grid(
+        ttk.Label(parent, textvariable=name_var, style=body_style, wraplength=160, justify="left").grid(
             row=0, column=0, sticky="w"
         )
         ttk.Label(parent, textvariable=status_var, style=subtle_style).grid(row=1, column=0, sticky="w", pady=(2, 0))
 
         progress = ttk.Scale(parent, from_=0, to=100, orient="horizontal", variable=seek_var)
-        progress.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        progress.grid(row=2, column=0, sticky="ew", pady=(4, 0))
         progress.bind("<ButtonPress-1>", lambda _event, item=kind: self._begin_seek(item))
         progress.bind("<ButtonRelease-1>", lambda _event, item=kind: self._commit_seek(item))
 
         footer = ttk.Frame(parent, style=frame_style)
-        footer.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        footer.grid(row=3, column=0, sticky="ew", pady=(6, 0))
         footer.columnconfigure(0, weight=1)
         ttk.Label(footer, textvariable=time_var, style=subtle_style).grid(row=0, column=0, sticky="w")
 
         controls = ttk.Frame(parent, style=frame_style)
-        controls.grid(row=4, column=0, sticky="ew", pady=(8, 0))
-        controls.columnconfigure(0, weight=1)
-        controls.columnconfigure(1, weight=1)
-        controls.columnconfigure(2, weight=1)
+        controls.grid(row=4, column=0, sticky="w", pady=(6, 0))
 
-        play_button = ttk.Button(controls, text="Play", command=lambda item=kind: self.play_audio(item))
-        play_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        pause_button = ttk.Button(controls, text="Pause", command=lambda item=kind: self.pause_audio(item))
-        pause_button.grid(row=0, column=1, sticky="ew", padx=4)
-        stop_button = ttk.Button(controls, text="Stop", command=lambda item=kind: self.stop_audio(item))
-        stop_button.grid(row=0, column=2, sticky="ew", padx=(4, 0))
+        play_button = ttk.Button(controls, text="Play", width=9, style="ActionSmall.TButton", command=lambda item=kind: self.play_audio(item))
+        play_button.grid(row=0, column=0, sticky="w", padx=(0, 4))
+        pause_button = ttk.Button(controls, text="Pause", width=9, style="ActionSmall.TButton", command=lambda item=kind: self.pause_audio(item))
+        pause_button.grid(row=0, column=1, sticky="w", padx=4)
+        stop_button = ttk.Button(controls, text="Stop", width=9, style="ActionSmall.TButton", command=lambda item=kind: self.stop_audio(item))
+        stop_button.grid(row=0, column=2, sticky="w", padx=(4, 0))
 
         self.player_widgets[kind] = {
             "name_var": name_var,
@@ -408,17 +504,39 @@ class RestorationStudioTkApp:
         }
 
     def _build_details_card(self, parent):
-        card = self._make_card(parent, "Diagnostics")
-        top = ttk.Frame(card, style="Card.TFrame")
-        top.pack(fill="x")
-        ttk.Label(top, text="Recent backend details", style="Section.TLabel").pack(side="left")
-        self.toggle_details_button = ttk.Button(top, text="Show details", command=self.toggle_details)
-        self.toggle_details_button.pack(side="right")
+        card = self._make_card(parent, "Guidance")
+        summary = ttk.Frame(card, style="Card.TFrame")
+        summary.pack(fill="x")
+        summary.columnconfigure(1, weight=1)
+        ttk.Label(summary, text="Recommendation", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(summary, textvariable=self.analysis_recommendation_var, style="Body.TLabel").grid(row=0, column=1, sticky="w", padx=(10, 0))
+        ttk.Label(
+            summary,
+            textvariable=self.analysis_summary_var,
+            style="Subtle.TLabel",
+            wraplength=380,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        self.details_frame = ttk.Frame(card, style="Card.TFrame")
+        controls = ttk.Frame(card, style="Card.TFrame")
+        controls.pack(fill="x", pady=(8, 0))
+        controls.columnconfigure(0, weight=1)
+        controls.columnconfigure(1, weight=1)
+        controls.columnconfigure(2, weight=1)
+        controls.columnconfigure(3, weight=1)
+        ttk.Label(controls, text="Analysis engine", style="Section.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(controls, textvariable=self.analysis_engine_var, style="Body.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 0))
+        ttk.Label(controls, text="Model strategy", style="Section.TLabel").grid(row=0, column=1, sticky="w")
+        ttk.Label(controls, textvariable=self.analysis_model_var, style="Body.TLabel").grid(row=1, column=1, sticky="w", pady=(2, 0))
+        self.use_recommendation_button = ttk.Button(controls, text="Use recommendation", style="ActionSmall.TButton", command=self.use_analysis_recommendation)
+        self.use_recommendation_button.grid(row=0, column=2, rowspan=2, sticky="e", padx=(8, 0))
+
+        self.details_frame = ttk.Frame(card, style="Card.TFrame", height=92)
+        self.details_frame.pack(fill="x", pady=(8, 0))
+        self.details_frame.pack_propagate(False)
         self.details_text = tk.Text(
             self.details_frame,
-            height=10,
+            height=3,
             wrap="word",
             bg="#0F172A",
             fg="#D8E1EA",
@@ -447,6 +565,15 @@ class RestorationStudioTkApp:
     def _restoration_preset_label_from_key(self, key):
         return RestorationStudioBackend.RESTORATION_PRESET_LABELS.get(key, RestorationStudioBackend.RESTORATION_PRESET_LABELS["medium"])
 
+    def _ai_model_key_from_label(self, label):
+        for key, value in RestorationStudioBackend.AI_MODEL_PRESET_LABELS.items():
+            if value == label:
+                return key
+        return "balanced"
+
+    def _ai_model_label_from_key(self, key):
+        return RestorationStudioBackend.AI_MODEL_PRESET_LABELS.get(key, RestorationStudioBackend.AI_MODEL_PRESET_LABELS["balanced"])
+
     def _normalize_hum_label(self, value):
         text = str(value).strip().replace("hz", "").replace("Hz", "").strip()
         try:
@@ -472,10 +599,30 @@ class RestorationStudioTkApp:
         self.normalize_audio.set(defaults["normalize_audio"])
         self.stem_rebalance.set(defaults["stem_rebalance"])
         self.bandwidth_restore.set(defaults["bandwidth_restore"])
+        self.ai_dereverb.set(defaults.get("ai_dereverb", False))
         self.backend_choice.set(defaults["backend"])
+        self.ai_model_preset.set(self._ai_model_label_from_key(defaults.get("ai_model_preset", "balanced")))
         self.bass_boost.set(defaults["bass_boost"])
         self.treble_boost.set(defaults["treble_boost"])
         self.volume_boost.set(defaults["volume_boost"])
+        self._sync_profile_rules()
+
+    def _apply_recommended_options(self, profile, options):
+        self.selected_profile.set(profile)
+        self.profile_combo.set(RestorationStudioBackend.PROFILE_LABELS[profile])
+        self.restoration_cleanup.set(bool(options.get("restoration_cleanup", False)))
+        self.restoration_preset.set(self._restoration_preset_label_from_key(options.get("restoration_preset", "medium")))
+        self.hum_frequency.set(self._normalize_hum_label(options.get("hum_frequency", 60)))
+        self.clarity_mastering.set(bool(options.get("clarity_mastering", False)))
+        self.normalize_audio.set(bool(options.get("normalize_audio", False)))
+        self.stem_rebalance.set(bool(options.get("stem_rebalance", False)))
+        self.bandwidth_restore.set(bool(options.get("bandwidth_restore", False)))
+        self.ai_dereverb.set(bool(options.get("ai_dereverb", False)))
+        self.backend_choice.set(options.get("backend", "roformer"))
+        self.ai_model_preset.set(self._ai_model_label_from_key(options.get("ai_model_preset", "balanced")))
+        self.bass_boost.set(int(options.get("bass_boost", 0)))
+        self.treble_boost.set(int(options.get("treble_boost", 0)))
+        self.volume_boost.set(int(options.get("volume_boost", 0)))
         self._sync_profile_rules()
 
     def _sync_profile_rules(self):
@@ -488,6 +635,7 @@ class RestorationStudioTkApp:
             self.clarity_mastering.set(False)
             self.normalize_audio.set(False)
             self.stem_rebalance.set(True)
+            self.ai_dereverb.set(False)
         for widget in (self.cleanup_check, self.mastering_check, self.normalize_check):
             widget.state(["disabled"] if stem_mode else ["!disabled"])
         restoration_enabled = self.restoration_cleanup.get() and not stem_mode
@@ -495,10 +643,14 @@ class RestorationStudioTkApp:
         self.restoration_preset_combo.config(state=combo_state)
         self.hum_combo.config(state=combo_state)
 
-        bandwidth_allowed = profile in {"restore", "advanced"}
+        bandwidth_allowed = profile in {"restore", "advanced", "compression"}
         if not bandwidth_allowed:
             self.bandwidth_restore.set(False)
         self.bandwidth_check.state(["!disabled"] if bandwidth_allowed else ["disabled"])
+        dereverb_allowed = profile in {"restore", "enhance", "advanced"}
+        if not dereverb_allowed:
+            self.ai_dereverb.set(False)
+        self.dereverb_check.state(["!disabled"] if dereverb_allowed and not stem_mode else ["disabled"])
 
         backend_allowed = advanced or stem_mode or self.stem_rebalance.get()
         self.backend_combo.config(state="readonly" if backend_allowed else "disabled")
@@ -517,13 +669,19 @@ class RestorationStudioTkApp:
         self.enhanced_name_var.set(state["enhanced_name"])
         self.session_dir_var.set(state["session_dir"] or "No active session")
         self.export_format.set(state["current_export_format"])
+        self.analysis_summary_var.set(state["analysis_summary"])
+        self.analysis_recommendation_var.set(state["analysis_recommendation"])
+        self.analysis_model_var.set(state["analysis_model_strategy"])
+        self.analysis_engine_var.set(state["analysis_engine"])
 
         self.download_button.config(state=("disabled" if state["processing"] else "normal"))
+        self.analyze_button.config(state=("disabled" if state["processing"] or not state["has_original"] else "normal"))
         self.import_path_var.set(self.import_path_var.get())
         self.apply_button.config(state=("disabled" if state["processing"] or not state["has_original"] else "normal"))
         self.undo_button.config(state=("normal" if state["can_undo"] else "disabled"))
         self.revert_button.config(state=("normal" if state["can_revert"] else "disabled"))
         self.export_button.config(state=("disabled" if state["processing"] or not state["has_original"] else "normal"))
+        self.use_recommendation_button.config(state=("normal" if state["analysis_ready"] and not state["processing"] else "disabled"))
         self._refresh_player_panel("original", state["has_original"], state["original_name"], active=(self.playback_kind == "original"))
         self._refresh_player_panel("enhanced", state["has_enhanced"], state["enhanced_name"], active=(self.playback_kind == "enhanced"))
 
@@ -537,6 +695,21 @@ class RestorationStudioTkApp:
         current_enhanced = self.backend.current_file if state["has_enhanced"] else None
         self._invalidate_cache_if_needed("original", current_original)
         self._invalidate_cache_if_needed("enhanced", current_enhanced)
+
+        analysis = self.backend.last_analysis
+        if analysis:
+            signature = (
+                analysis.get("summary"),
+                analysis.get("recommendation_label"),
+                analysis.get("ai_model_label"),
+                analysis.get("analysis_engine_label"),
+                analysis.get("duration_seconds"),
+            )
+            if signature != self._last_applied_analysis_signature:
+                self._apply_recommended_options(analysis["profile"], analysis["options"])
+                self._last_applied_analysis_signature = signature
+        else:
+            self._last_applied_analysis_signature = None
 
         self.root.after(1000, self._refresh_state)
 
@@ -608,17 +781,32 @@ class RestorationStudioTkApp:
             "normalize_audio": self.normalize_audio.get(),
             "stem_rebalance": self.stem_rebalance.get(),
             "bandwidth_restore": self.bandwidth_restore.get(),
+            "ai_dereverb": self.ai_dereverb.get(),
             "backend": self.backend_choice.get(),
+            "ai_model_preset": self._ai_model_key_from_label(self.ai_model_preset.get()),
             "bass_boost": int(self.bass_boost.get()),
             "treble_boost": int(self.treble_boost.get()),
             "volume_boost": int(self.volume_boost.get()),
         }
+
+    def analyze_source(self):
+        try:
+            self.backend.run_job(self.backend.analyze_current_source)
+        except Exception as exc:
+            messagebox.showerror("Analyze Source", str(exc))
 
     def apply_profile(self):
         try:
             self.backend.run_job(self.backend.enhance_current, self.collect_options())
         except Exception as exc:
             messagebox.showerror("Apply Profile", str(exc))
+
+    def use_analysis_recommendation(self):
+        analysis = self.backend.last_analysis
+        if not analysis:
+            messagebox.showinfo("Guidance", "Run Analyze Source first.")
+            return
+        self._apply_recommended_options(analysis["profile"], analysis["options"])
 
     def undo_last(self):
         try:
@@ -838,17 +1026,6 @@ class RestorationStudioTkApp:
     def _format_time(seconds):
         seconds = max(0, int(seconds))
         return f"{seconds // 60}:{seconds % 60:02d}"
-
-    def toggle_details(self):
-        if self.show_details.get():
-            self.show_details.set(False)
-            self.details_frame.pack_forget()
-            self.toggle_details_button.config(text="Show details")
-        else:
-            self.show_details.set(True)
-            self.details_frame.pack(fill="both", expand=True, pady=(10, 0))
-            self.toggle_details_button.config(text="Hide details")
-
 
 def main():
     root = tk.Tk()

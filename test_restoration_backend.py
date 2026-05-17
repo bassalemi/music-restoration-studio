@@ -17,6 +17,7 @@ def make_backend():
 
     temp_root = Path(tempfile.mkdtemp(prefix="restoration_backend_test_"))
     backend = RestorationStudioBackend(temp_root)
+    backend.enable_learned_analysis = False
     return backend, temp_root
 
 
@@ -88,6 +89,13 @@ def test_download_options_and_profiles():
         assert profile == "enhance"
         assert options["bandwidth_restore"] is False
         assert options["backend"] == "roformer"
+        assert options["ai_model_preset"] == "balanced"
+
+        profile, options = backend._normalize_options({"profile": "compression", "bandwidth_restore": True, "ai_model_preset": "low_vram"})
+        assert profile == "compression"
+        assert options["bandwidth_restore"] is True
+        assert options["ai_model_preset"] == "low_vram"
+        assert options["ai_dereverb"] is False
 
         profile, options = backend._normalize_options({"profile": "stem", "clarity_mastering": True})
         assert profile == "stem"
@@ -99,6 +107,29 @@ def test_download_options_and_profiles():
         assert "browser session" in direct_error.lower()
         assert "different browser session" in browser_error.lower()
         return {"profiles": "ok"}
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def test_ai_analysis_and_recommendation():
+    backend, temp_root = make_backend()
+    try:
+        copied = backend._start_fresh_session(make_sample_wav(temp_root, seconds=4.0))
+        backend.analyze_current_source()
+        analysis = backend.last_analysis
+        assert analysis is not None
+        assert analysis["profile"] in {"restore", "enhance", "compression", "stem", "advanced"}
+        assert analysis["options"]["ai_model_preset"] in backend.AI_MODEL_PRESETS
+        assert analysis["options"]["hum_frequency"] in backend.HUM_FREQUENCIES
+        assert analysis["analysis_engine_label"] == "DSP heuristics"
+        assert "AI source analysis" in analysis["details"]
+        assert analysis["hum_strength"] >= 0.0
+        assert Path(copied).exists()
+        return {
+            "summary": analysis["summary"],
+            "profile": analysis["profile"],
+            "ai_model_preset": analysis["options"]["ai_model_preset"],
+        }
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
 
@@ -158,6 +189,7 @@ def main():
     results = {
         "session_and_history": test_session_and_history(),
         "download_options_and_profiles": test_download_options_and_profiles(),
+        "ai_analysis_and_recommendation": test_ai_analysis_and_recommendation(),
         "filters_and_export": test_filters_and_export(),
     }
     if args.suite in {"models", "all"}:

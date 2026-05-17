@@ -14,8 +14,26 @@ __pycache__/
 # Runtime outputs
 sessions/
 sample/
-models/
+models/*
 *.log
+
+# Keep only bundled core models in git; ignore generated caches and warmups
+!models/audio-separator/
+models/audio-separator/*
+!models/audio-separator/BS-Roformer-SW.ckpt
+!models/audio-separator/BS-Roformer-SW.yaml
+!models/audio-separator/model_bs_roformer_ep_317_sdr_12.9755.ckpt
+!models/audio-separator/model_bs_roformer_ep_317_sdr_12.9755.yaml
+!models/audio-separator/UVR-DeEcho-DeReverb.pth
+!models/audio-separator/download_checks.json
+!models/audio-separator/mdx_model_data.json
+!models/audio-separator/vr_model_data.json
+!models/panns-home/
+models/panns-home/*
+!models/panns-home/panns_data/
+models/panns-home/panns_data/*
+!models/panns-home/panns_data/Cnn14_mAP=0.431.pth
+!models/panns-home/panns_data/class_labels_indices.csv
 
 # OS noise
 .DS_Store

@@ -13,6 +13,7 @@ demucs>=4.0.0
 # Optional advanced AI backend used by the new app's primary stem rebalance path.
 audio-separator>=0.41.1
 onnxruntime>=1.17.0
+panns-inference>=0.1.1
 
 # Legacy pitch-stack dependencies are intentionally no longer part of
 # the main dependency story for the restoration app.
