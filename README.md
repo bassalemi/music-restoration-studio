@@ -68,12 +68,6 @@ Run the desktop app:
 - AudioSR bandwidth restoration
 - Demucs legacy fallback for stem rebalance
 
-## Removed From the Main Product Path
-
-These older features are intentionally no longer part of the visible workflow:
-- DeepFilterNet vocal cleanup
-- CREPE + Rubber Band pitch stabilization
-- the legacy `youtube_audio_downloader.py` app
 
 ## Install
 
