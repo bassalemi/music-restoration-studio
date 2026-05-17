@@ -1,0 +1,27 @@
+# Virtual environments
+.venv/
+.venv_audiosr/
+
+# Editor / local config
+.vscode/
+.idea/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Runtime outputs
+sessions/
+sample/
+models/
+*.log
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Local test and playback artifacts
+playback_cache/
+exports/
+*.part

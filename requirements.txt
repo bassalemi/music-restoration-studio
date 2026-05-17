@@ -1,0 +1,18 @@
+pygame>=2.6.0
+yt-dlp>=2024.0.0
+packaging>=24.0
+setuptools<82
+numpy==2.2.6
+scipy==1.15.3
+soundfile==0.13.1
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.4.1+cu121
+torchaudio==2.4.1+cu121
+demucs>=4.0.0
+
+# Optional advanced AI backend used by the new app's primary stem rebalance path.
+audio-separator>=0.41.1
+onnxruntime>=1.17.0
+
+# Legacy pitch-stack dependencies are intentionally no longer part of
+# the main dependency story for the restoration app.
